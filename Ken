@@ -1,0 +1,231 @@
+-- AbilitiesUI LocalScript
+-- Place in StarterGui > AbilitiesUI (ScreenGui)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+
+local UseAbility = ReplicatedStorage:WaitForChild("UseAbility")
+local AbilityApproved = ReplicatedStorage:WaitForChild("AbilityApproved")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+
+-- UI refs
+local screenGui = script.Parent
+local mainFrame = screenGui:WaitForChild("MainFrame")
+local staminaBar = mainFrame:WaitForChild("StaminaBar")
+local staminaFill = staminaBar:WaitForChild("StaminaFill")
+local abilitiesHolder = mainFrame:WaitForChild("AbilitiesHolder")
+
+-- Config (mirror server values roughly — these are used only for client display)
+local ClientDefs = {
+    Slash = { Cooldown = 1.0, StaminaCost = 10 },
+    Dash  = { Cooldown = 3.0, StaminaCost = 20 },
+    Blast = { Cooldown = 4.0, StaminaCost = 25 }
+}
+
+-- runtime state on client (cooldowns and stamina)
+local clientState = {
+    Cooldowns = {},
+    Stamina = 100,
+    MaxStamina = 100
+}
+
+-- UI utilities
+local function setCooldownOverlay(button, progress) -- progress 0..1 (0 = ready, 1 = full)
+    local overlay = button:FindFirstChild("CooldownOverlay")
+    if overlay and overlay:IsA("ImageLabel") then
+        overlay.Visible = progress > 0
+        overlay.Size = UDim2.new(1, 0, progress, 0) -- overlay grows downward
+        overlay.AnchorPoint = Vector2.new(0, 0)
+        overlay.Position = UDim2.new(0, 0, 0, 0)
+    end
+end
+
+local function setStaminaBar(value) -- value 0..max
+    local pct = math.clamp(value / clientState.MaxStamina, 0, 1)
+    staminaFill:TweenSize(UDim2.new(pct, 0, 1, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.15, true)
+end
+
+-- Message helper (optional notification)
+local function notify(text, time)
+    local n = screenGui:FindFirstChild("Notification")
+    if not n then
+        n = Instance.new("TextLabel", screenGui)
+        n.Name = "Notification"
+        n.Size = UDim2.new(0.3, 0, 0.06, 0)
+        n.Position = UDim2.new(0.35, 0, 0.02, 0)
+        n.BackgroundTransparency = 0.4
+        n.TextScaled = true
+    end
+    n.Text = text
+    n.Visible = true
+    delay(time or 2, function()
+        if n then n.Visible = false end
+    end)
+end
+
+-- create a map of buttons
+local abilityButtons = {}
+for _, btn in ipairs(abilitiesHolder:GetChildren()) do
+    if btn:IsA("TextButton") then
+        abilityButtons[btn.Name] = btn
+        -- initialize overlay
+        setCooldownOverlay(btn, 0)
+    end
+end
+
+-- start client stamina ticker (regeneration)
+spawn(function()
+    while true do
+        wait(0.5)
+        -- regen rate: 5 per second total ~2.5 per 0.5s
+        local regen = 2.5
+        clientState.Stamina = math.min(clientState.MaxStamina, clientState.Stamina + regen)
+        setStaminaBar(clientState.Stamina)
+    end
+end)
+
+-- manage cooldowns (reduce over time)
+spawn(function()
+    while true do
+        local now = tick()
+        for name, endTime in pairs(clientState.Cooldowns) do
+            local btn = abilityButtons[name]
+            if not btn then
+                clientState.Cooldowns[name] = nil
+            else
+                local duration = math.max(0.0001, endTime - (endTime - (ClientDefs[name] and ClientDefs[name].Cooldown or 1)))
+                local remaining = math.clamp(endTime - now, 0, ClientDefs[name].Cooldown or 1)
+                local prog = remaining / (ClientDefs[name].Cooldown or 1) -- 1 = full overlay
+                setCooldownOverlay(btn, prog)
+                if remaining <= 0 then
+                    clientState.Cooldowns[name] = nil
+                    setCooldownOverlay(btn, 0)
+                end
+            end
+        end
+        wait(0.05)
+    end
+end)
+
+-- Requesting ability (safely): sends mouse.Hit.Position for ranged/movement
+local function requestAbility(name)
+    local btn = abilityButtons[name]
+    if not btn then return end
+    -- cooldown check client-side
+    if clientState.Cooldowns[name] and clientState.Cooldowns[name] > tick() then
+        notify(name .. " is cooling down", 1.2)
+        return
+    end
+    -- stamina check client-side
+    local cost = (ClientDefs[name] and ClientDefs[name].StaminaCost) or 0
+    if clientState.Stamina < cost then
+        notify("Not enough stamina", 1.2)
+        return
+    end
+    -- determine target position: for melee use player's root, for others use mouse.Hit
+    local targetPos = nil
+    if name == "Slash" then
+        local char = player.Character
+        if char and char:FindFirstChild("HumanoidRootPart") then
+            targetPos = char.HumanoidRootPart.Position
+        else
+            targetPos = Vector3.new()
+        end
+    else
+        if mouse and mouse.Hit then
+            targetPos = mouse.Hit.Position
+        else
+            targetPos = Vector3.new()
+        end
+    end
+
+    -- local visual quick feedback (optional): dim button briefly
+    btn.BackgroundTransparency = 0.6
+    delay(0.12, function() if btn then btn.BackgroundTransparency = 0 end)
+
+    -- Fire server request (server will validate and send back approval)
+    UseAbility:FireServer(name, targetPos)
+end
+
+-- Connect UI buttons and keybinds
+for name, btn in pairs(abilityButtons) do
+    btn.MouseButton1Click:Connect(function()
+        requestAbility(name)
+    end)
+end
+
+-- Example keybinds: E = Slash, Q = Dash, R = Blast
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        if input.KeyCode == Enum.KeyCode.E then
+            requestAbility("Slash")
+        elseif input.KeyCode == Enum.KeyCode.Q then
+            requestAbility("Dash")
+        elseif input.KeyCode == Enum.KeyCode.R then
+            requestAbility("Blast")
+        end
+    end
+end)
+
+-- When server approves the ability, update UI state (cooldown + stamina consumed) and play VFX
+AbilityApproved.OnClientEvent:Connect(function(abilityName, data)
+    -- data may contain Position or other info from server
+    -- set cooldown on client
+    local def = ClientDefs[abilityName]
+    if def then
+        clientState.Cooldowns[abilityName] = tick() + def.Cooldown
+        -- consume stamina client-side for display (server is authoritative)
+        clientState.Stamina = math.max(0, clientState.Stamina - def.StaminaCost)
+        setStaminaBar(clientState.Stamina)
+    end
+
+    -- Play approved VFX: simple sample — flash button
+    local btn = abilityButtons[abilityName]
+    if btn then
+        local original = btn.BackgroundColor3
+        local tweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, false, 0)
+        local t1 = TweenService:Create(btn, tweenInfo, {BackgroundColor3 = Color3.fromRGB(255, 200, 0)})
+        local t2 = TweenService:Create(btn, tweenInfo, {BackgroundColor3 = original})
+        t1:Play()
+        t1.Completed:Wait()
+        t2:Play()
+    end
+
+    -- Example client-side effects depending on ability
+    if abilityName == "Dash" then
+        -- local dash motion for responsiveness
+        local char = player.Character
+        if char and char:FindFirstChild("HumanoidRootPart") and data and data.Position then
+            local hrp = char.HumanoidRootPart
+            local dir = (data.Position - hrp.Position)
+            dir = Vector3.new(dir.X, 0, dir.Z)
+            if dir.Magnitude > 0.5 then
+                dir = dir.Unit
+                local dashDist = 12
+                local target = hrp.Position + dir * dashDist
+                -- smooth teleport by tweening CFrame
+                pcall(function()
+                    char:SetPrimaryPartCFrame(CFrame.new(target + Vector3.new(0,2,0)))
+                end)
+            end
+        end
+    elseif abilityName == "Blast" then
+        -- you could spawn a local particle or sound here
+        -- e.g., play a sound in the player's character
+        local char = player.Character
+        if char then
+            local s = Instance.new("Sound", char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart or char)
+            s.SoundId = "rbxassetid://12222124" -- replace with your sound asset id
+            s.Volume = 0.8
+            s:Play()
+            game.Debris:AddItem(s, 2)
+        end
+    elseif abilityName == "Slash" then
+        -- play local swing VFX/animation
+        -- recommended: use Animator + Animation object (not included here)
+    end
+end)
