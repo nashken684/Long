@@ -1,0 +1,13 @@
+local function setButtonInteractable(button, enabled)
+    button.Active = enabled
+    button.AutoButtonColor = enabled
+end
+
+-- In cooldown manager:
+if remaining <= 0 then
+    clientState.Cooldowns[name] = nil
+    setCooldownOverlay(btn, 0)
+    setButtonInteractable(btn, true)
+else
+    setButtonInteractable(btn, false)
+end
